@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dual Motor RPM</title>
+<style>
+:root{--bg:#f4f4f6;--fg:#111;--card:#fff;--mut:#666;color-scheme:light dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b0b0d;--fg:#f2f2f2;--card:#1a1a1f;--mut:#9a9aa3}}
+:root[data-theme="dark"]{--bg:#0b0b0d;--fg:#f2f2f2;--card:#1a1a1f;--mut:#9a9aa3}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:15px system-ui,sans-serif}
+body{padding:10px;max-width:640px;margin:auto}
+#stage{position:relative;width:100%;background:#000;border-radius:12px;overflow:hidden;aspect-ratio:4/3;touch-action:none}
+video,canvas{position:absolute;inset:0;width:100%;height:100%}
+.row{display:flex;gap:10px;margin:10px 0}
+.card{flex:1;background:var(--card);border-radius:12px;padding:10px}
+.card b{font-size:28px;display:block;font-variant-numeric:tabular-nums}
+.card span{color:var(--mut);font-size:12px}
+label{display:block;font-size:13px;color:var(--mut);margin-top:6px}
+input[type=range]{width:100%}
+button{width:100%;padding:12px;border:0;border-radius:10px;background:#2b7fff;color:#fff;font-size:16px}
+#msg{color:var(--mut);font-size:12px;margin-top:8px}
+</style></head><body>
+<div id="stage"><video id="v" playsinline muted></video><canvas id="c"></canvas></div>
+<div class="row">
+ <div class="card" style="border-left:5px solid #00e0ff"><span>Motor A</span><b id="ra">–</b><span id="da"></span></div>
+ <div class="card" style="border-left:5px solid #ff9a1f"><span>Motor B</span><b id="rb">–</b><span id="db"></span></div>
+</div>
+<button id="go">Start camera</button>
+<div class="card" style="margin-top:10px">
+ <label>Ring A size <input id="sa" type="range" min="3" max="30" value="10"></label>
+ <label>Ring B size <input id="sb" type="range" min="3" max="30" value="10"></label>
+ <label>Sensitivity (min contrast) <input id="sc" type="range" min="10" max="120" value="40"></label>
+</div>
+<div id="msg">Drag each ring so it is centred on a motor shaft and passes over the white mark. Keep the phone steady and well lit. Max readable speed is roughly 15 × camera fps (about 900 RPM at 60 fps).</div>
+<script>
+const v=document.getElementById('v'),c=document.getElementById('c'),ctx=c.getContext('2d');
+const off=document.createElement('canvas'),octx=off.getContext('2d',{willReadFrequently:true});
+const msg=document.getElementById('msg');
+const T=[{x:.3,y:.5,col:'#00e0ff',s:'sa',r:'ra',d:'da'},{x:.7,y:.5,col:'#ff9a1f',s:'sb',r:'rb',d:'db'}];
+T.forEach(t=>{t.hist=[];t.un=0;t.last=null;t.lastT=0;t.rpm=null;t.mark=null;});
+let W=320,H=240,drag=null;
+const N=96;
+function rad(t){return +document.getElementById(t.s).value/100*W}
+function process(now){
+  octx.drawImage(v,0,0,W,H);
+  const minC=+document.getElementById('sc').value;
+  for(const t of T){
+    const r=rad(t),cx=t.x*W,cy=t.y*H;
+    const x0=Math.max(0,Math.floor(cx-r-3)),y0=Math.max(0,Math.floor(cy-r-3));
+    const w=Math.min(W-x0,Math.ceil(2*r+7)),h=Math.min(H-y0,Math.ceil(2*r+7));
+    if(w<4||h<4){t.mark=null;continue}
+    const d=octx.getImageData(x0,y0,w,h).data;
+    const lum=new Float32Array(N);
+    for(let i=0;i<N;i++){
+      const a=i*2*Math.PI/N,px=Math.round(cx+r*Math.cos(a))-x0,py=Math.round(cy+r*Math.sin(a))-y0;
+      let s=0,n=0;
+      for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+        const X=px+dx,Y=py+dy;if(X<0||Y<0||X>=w||Y>=h)continue;
+        const k=(Y*w+X)*4;s+=.299*d[k]+.587*d[k+1]+.114*d[k+2];n++;}
+      lum[i]=n?s/n:0;
+    }
+    const sorted=Array.from(lum).sort((a,b)=>a-b),med=sorted[N>>1],mx=sorted[N-1];
+    if(mx-med<minC){t.mark=null;continue}
+    const th=med+.5*(mx-med);let sx=0,sy=0;
+    for(let i=0;i<N;i++)if(lum[i]>th){const wgt=lum[i]-th,a=i*2*Math.PI/N;sx+=wgt*Math.cos(a);sy+=wgt*Math.sin(a);}
+    const ang=Math.atan2(sy,sx);t.mark=ang;
+    const ts=now/1000;
+    if(t.last===null||ts-t.lastT>.3){t.hist=[];t.un=ang;}
+    else{let dl=ang-t.last;while(dl>Math.PI)dl-=2*Math.PI;while(dl<-Math.PI)dl+=2*Math.PI;t.un+=dl;}
+    t.last=ang;t.lastT=ts;t.hist.push([ts,t.un]);
+    while(t.hist.length&&ts-t.hist[0][0]>1.5)t.hist.shift();
+    const hs=t.hist;
+    if(hs.length>=8&&hs[hs.length-1][0]-hs[0][0]>.4){
+      let st=0,sa=0,stt=0,sta=0;const n=hs.length;
+      for(const[a,b]of hs){st+=a;sa+=b;stt+=a*a;sta+=a*b;}
+      const den=n*stt-st*st;
+      if(den>0){const slope=(n*sta-st*sa)/den;const rpm=slope/(2*Math.PI)*60;
+        t.rpm=t.rpm===null?rpm:t.rpm*.6+rpm*.4;}
+    }
+  }
+}
+function show(){
+  for(const t of T){
+    const alive=performance.now()/1000-t.lastT<.6;
+    const el=document.getElementById(t.r),dl=document.getElementById(t.d);
+    if(alive&&t.rpm!==null){el.textContent=Math.abs(t.rpm).toFixed(0)+' RPM';dl.textContent=t.rpm>=0?'clockwise':'counter-clockwise';}
+    else{el.textContent='–';dl.textContent='no mark detected';t.rpm=null;}
+  }
+}
+function draw(){
+  const cw=c.clientWidth,ch=c.clientHeight;
+  if(c.width!==cw||c.height!==ch){c.width=cw;c.height=ch;}
+  ctx.clearRect(0,0,cw,ch);const k=cw/W;
+  T.forEach((t,i)=>{
+    const r=rad(t)*k,cx=t.x*cw,cy=t.y*ch;
+    ctx.strokeStyle=t.col;ctx.lineWidth=2;ctx.beginPath();ctx.arc(cx,cy,r,0,7);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(cx-6,cy);ctx.lineTo(cx+6,cy);ctx.moveTo(cx,cy-6);ctx.lineTo(cx,cy+6);ctx.stroke();
+    ctx.fillStyle=t.col;ctx.font='bold 14px sans-serif';ctx.fillText(i?'B':'A',cx-4,cy-r-6);
+    if(t.mark!==null){ctx.beginPath();ctx.arc(cx+r*Math.cos(t.mark),cy+r*Math.sin(t.mark),6,0,7);ctx.fill();}
+  });
+}
+function frame(now){
+  if(v.readyState>=2){process(now);show();draw();}
+  if(v.requestVideoFrameCallback)v.requestVideoFrameCallback((n,m)=>frame(m&&m.captureTime?m.captureTime:n));
+  else requestAnimationFrame(frame);
+}
+function pos(e){const b=c.getBoundingClientRect();return[(e.clientX-b.left)/b.width,(e.clientY-b.top)/b.height]}
+c.addEventListener('pointerdown',e=>{const[x,y]=pos(e);let best=0,bd=1e9;
+  T.forEach((t,i)=>{const d=Math.hypot(t.x-x,t.y-y);if(d<bd){bd=d;best=i}});drag=T[best];drag.x=x;drag.y=y;c.setPointerCapture(e.pointerId);});
+c.addEventListener('pointermove',e=>{if(!drag)return;[drag.x,drag.y]=pos(e);drag.hist=[];drag.last=null;});
+c.addEventListener('pointerup',()=>drag=null);
+document.getElementById('go').onclick=async()=>{
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:60}}});
+    v.srcObject=s;await v.play();
+    const st=s.getVideoTracks()[0].getSettings();
+    const vw=v.videoWidth,vh=v.videoHeight;
+    document.getElementById('stage').style.aspectRatio=vw+'/'+vh;
+    W=480;H=Math.round(480*vh/vw);off.width=W;off.height=H;
+    document.getElementById('go').style.display='none';
+    msg.textContent='Camera '+vw+'×'+vh+' @ '+Math.round(st.frameRate||30)+' fps. '+msg.textContent;
+    frame(performance.now());
+  }catch(err){msg.textContent='Camera unavailable: '+err.message+'. The page needs HTTPS and camera permission.';}
+};
+</script></body></html>
