@@ -16,6 +16,7 @@ video,canvas{position:absolute;inset:0;width:100%;height:100%}
 .card span{color:var(--mut);font-size:12px}
 label{display:block;font-size:13px;color:var(--mut);margin-top:6px}
 input[type=range]{width:100%}
+select{width:100%;padding:6px;border-radius:8px;background:var(--bg);color:var(--fg);border:1px solid var(--mut)}
 button{width:100%;padding:12px;border:0;border-radius:10px;background:#2b7fff;color:#fff;font-size:16px}
 #msg{color:var(--mut);font-size:12px;margin-top:8px}
 </style></head><body>
@@ -29,6 +30,11 @@ button{width:100%;padding:12px;border:0;border-radius:10px;background:#2b7fff;co
  <label>Ring A size <input id="sa" type="range" min="3" max="30" value="10"></label>
  <label>Ring B size <input id="sb" type="range" min="3" max="30" value="10"></label>
  <label>Sensitivity (min contrast) <input id="sc" type="range" min="10" max="120" value="40"></label>
+ <label>Brightness boost <input id="sbr" type="range" min="100" max="500" value="180"></label>
+ <label>Exposure (0 = auto, higher = brighter but blurrier) <input id="sx" type="range" min="0" max="100" value="0"></label>
+ <label>Frame rate (lower = brighter image)
+  <select id="sf"><option value="30">30 fps</option><option value="60" selected>60 fps</option><option value="120">120 fps</option><option value="240">240 fps</option></select>
+ </label>
 </div>
 <div id="fps" style="font-size:13px;color:var(--mut)"></div><div id="msg">Drag each ring so it is centred on a motor shaft and passes over the white mark. Keep the phone steady and well lit. Max readable speed is roughly 15 × camera fps (about 900 RPM at 60 fps).</div>
 <script>
@@ -37,10 +43,13 @@ const off=document.createElement('canvas'),octx=off.getContext('2d',{willReadFre
 const msg=document.getElementById('msg');
 const T=[{x:.3,y:.5,col:'#00e0ff',s:'sa',r:'ra',d:'da'},{x:.7,y:.5,col:'#ff9a1f',s:'sb',r:'rb',d:'db'}];
 T.forEach(t=>{t.hist=[];t.un=0;t.last=null;t.lastT=0;t.rpm=null;t.mark=null;});
-let W=320,H=240,drag=null;
+let W=320,H=240,drag=null,track=null;
 const N=96;
 function rad(t){return +document.getElementById(t.s).value/100*W}
+function boost(){return +document.getElementById('sbr').value/100}
+function applyBoost(){v.style.filter='brightness('+boost()+')';}
 function process(now){
+  if('filter' in octx)octx.filter='brightness('+boost()+')';
   octx.drawImage(v,0,0,W,H);
   const minC=+document.getElementById('sc').value;
   for(const t of T){
@@ -111,16 +120,37 @@ c.addEventListener('pointerdown',e=>{const[x,y]=pos(e);let best=0,bd=1e9;
   T.forEach((t,i)=>{const d=Math.hypot(t.x-x,t.y-y);if(d<bd){bd=d;best=i}});drag=T[best];drag.x=x;drag.y=y;c.setPointerCapture(e.pointerId);});
 c.addEventListener('pointermove',e=>{if(!drag)return;[drag.x,drag.y]=pos(e);drag.hist=[];drag.last=null;});
 c.addEventListener('pointerup',()=>drag=null);
+
+async function applyCam(){
+  if(!track)return;
+  const cp=track.getCapabilities?track.getCapabilities():{};
+  const f=+document.getElementById('sf').value;
+  const x=+document.getElementById('sx').value;
+  try{await track.applyConstraints({frameRate:{ideal:f}});}catch(e){}
+  try{
+    if(x>0&&cp.exposureTime&&cp.exposureMode&&cp.exposureMode.includes('manual')){
+      const mn=cp.exposureTime.min,mx=cp.exposureTime.max;
+      const val=mn*Math.pow(mx/mn,x/100);
+      await track.applyConstraints({advanced:[{exposureMode:'manual',exposureTime:val}]});
+    }else{
+      const adv={};
+      if(cp.exposureMode&&cp.exposureMode.includes('continuous'))adv.exposureMode='continuous';
+      if(cp.exposureCompensation)adv.exposureCompensation=cp.exposureCompensation.max;
+      await track.applyConstraints({advanced:[adv]});
+    }
+  }catch(e){}
+}
+['sx','sf'].forEach(id=>document.getElementById(id).addEventListener('change',applyCam));
+document.getElementById('sbr').addEventListener('input',applyBoost);
+
 document.getElementById('go').onclick=async()=>{
   try{
-    const s=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:640},height:{ideal:480},frameRate:{ideal:240,min:30}}});
-    const tr=s.getVideoTracks()[0];
-    try{const cp=tr.getCapabilities?tr.getCapabilities():{};
-      const adv=[];if(cp.frameRate&&cp.frameRate.max)adv.push({frameRate:cp.frameRate.max});
-      if(cp.exposureMode&&cp.exposureMode.includes('manual')&&cp.exposureTime)adv.push({exposureMode:'manual',exposureTime:Math.max(cp.exposureTime.min,Math.min(cp.exposureTime.max,20))});
-      await tr.applyConstraints({advanced:adv.length?adv:[{}],frameRate:{ideal:cp.frameRate&&cp.frameRate.max||240}});}catch(e){}
+    const f=+document.getElementById('sf').value;
+    const s=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:640},height:{ideal:480},frameRate:{ideal:f,min:30}}});
+    track=s.getVideoTracks()[0];
     v.srcObject=s;await v.play();
-    const st=tr.getSettings();
+    await applyCam();applyBoost();
+    const st=track.getSettings();
     const vw=v.videoWidth,vh=v.videoHeight;
     document.getElementById('stage').style.aspectRatio=vw+'/'+vh;
     W=320;H=Math.round(320*vh/vw);off.width=W;off.height=H;
